@@ -18,9 +18,9 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 pub use parser::Hunk;
 pub use parser::ParseError;
 use parser::ParseError::*;
+pub use parser::StreamingPatchParser;
 pub use parser::UpdateFileChunk;
 pub use parser::parse_patch;
-pub use parser::parse_patch_streaming;
 use similar::TextDiff;
 use thiserror::Error;
 
