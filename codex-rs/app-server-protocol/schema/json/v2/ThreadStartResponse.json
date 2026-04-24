@@ -1112,10 +1112,7 @@
                 {
                   "$ref": "#/definitions/ReadOnlyAccess"
                 }
-              ],
-              "default": {
-                "type": "fullAccess"
-              }
+              ]
             },
             "networkAccess": {
               "default": false,
@@ -1178,10 +1175,7 @@
                 {
                   "$ref": "#/definitions/ReadOnlyAccess"
                 }
-              ],
-              "default": {
-                "type": "fullAccess"
-              }
+              ]
             },
             "type": {
               "enum": [

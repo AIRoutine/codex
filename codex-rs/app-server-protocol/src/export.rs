@@ -1290,6 +1290,12 @@ where
         }
         enforce_numbered_definition_collision_overrides(file_stem, &mut schema_value);
         annotate_schema(&mut schema_value, Some(file_stem));
+        strip_schema_property_default(&mut schema_value, "ReadOnlySandboxPolicy", "access");
+        strip_schema_property_default(
+            &mut schema_value,
+            "WorkspaceWriteSandboxPolicy",
+            "readOnlyAccess",
+        );
     }
     // If the name looks like a namespaced path (e.g., "v2::Type"), mirror
     // the TypeScript layout and write to out_dir/v2/Type.json. Otherwise
@@ -1317,6 +1323,32 @@ where
         logical_name: logical_name.to_string(),
         value: schema_value,
     })
+}
+
+fn strip_schema_property_default(value: &mut Value, schema_title: &str, property_name: &str) {
+    match value {
+        Value::Object(map) => {
+            let title_matches = map.get("title").and_then(Value::as_str) == Some(schema_title);
+            if title_matches
+                && let Some(properties) = map.get_mut("properties").and_then(Value::as_object_mut)
+                && let Some(property) = properties
+                    .get_mut(property_name)
+                    .and_then(Value::as_object_mut)
+            {
+                property.remove("default");
+            }
+
+            for child in map.values_mut() {
+                strip_schema_property_default(child, schema_title, property_name);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_schema_property_default(item, schema_title, property_name);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 fn enforce_numbered_definition_collision_overrides(schema_name: &str, schema: &mut Value) {
@@ -2347,6 +2379,46 @@ mod tests {
             .as_object()
             .expect("ThreadStartParams should have properties");
         assert_eq!(properties.contains_key("mockExperimentalField"), false);
+        let _cleanup = fs::remove_dir_all(&output_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn generated_json_schema_omits_codegen_unfriendly_sandbox_defaults() -> Result<()> {
+        let output_dir = std::env::temp_dir().join(format!("codex_schema_{}", Uuid::now_v7()));
+        fs::create_dir(&output_dir)?;
+        let schema = write_json_schema_with_return::<v2::TurnStartParams>(
+            &output_dir,
+            "v2::TurnStartParams",
+        )?;
+
+        let sandbox_variants = schema.value["definitions"]["SandboxPolicy"]["oneOf"]
+            .as_array()
+            .expect("SandboxPolicy should be a oneOf");
+        let read_only = sandbox_variants
+            .iter()
+            .find(|variant| variant["title"].as_str() == Some("ReadOnlySandboxPolicy"))
+            .expect("ReadOnlySandboxPolicy variant should exist");
+        let workspace_write = sandbox_variants
+            .iter()
+            .find(|variant| variant["title"].as_str() == Some("WorkspaceWriteSandboxPolicy"))
+            .expect("WorkspaceWriteSandboxPolicy variant should exist");
+
+        assert!(read_only["properties"]["access"].get("default").is_none());
+        assert!(
+            workspace_write["properties"]["readOnlyAccess"]
+                .get("default")
+                .is_none()
+        );
+        assert_eq!(
+            read_only["properties"]["networkAccess"]["default"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            workspace_write["properties"]["networkAccess"]["default"].as_bool(),
+            Some(false)
+        );
+
         let _cleanup = fs::remove_dir_all(&output_dir);
         Ok(())
     }
