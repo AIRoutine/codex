@@ -1074,7 +1074,7 @@ impl App {
             token_usage: app.token_usage(),
             thread_id: resumable_thread.as_ref().map(|thread| thread.thread_id),
             thread_name: resumable_thread.and_then(|thread| thread.thread_name),
-            update_action: app.pending_update_action,
+            update_action: app.pending_update_action.clone(),
             exit_reason,
         })
     }

@@ -513,6 +513,7 @@ pub(crate) struct UpdateAvailableHistoryCell {
 #[cfg_attr(debug_assertions, allow(dead_code))]
 impl UpdateAvailableHistoryCell {
     pub(crate) fn new(latest_version: String, update_action: Option<UpdateAction>) -> Self {
+        let update_action = update_action.map(|action| action.with_target_version(&latest_version));
         Self {
             latest_version,
             update_action,
@@ -524,7 +525,7 @@ impl HistoryCell for UpdateAvailableHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         use ratatui_macros::line;
         use ratatui_macros::text;
-        let update_instruction = if let Some(update_action) = self.update_action {
+        let update_instruction = if let Some(update_action) = self.update_action.as_ref() {
             line!["Run ", update_action.command_str().cyan(), " to update."]
         } else {
             line![

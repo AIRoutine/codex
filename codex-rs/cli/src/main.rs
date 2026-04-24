@@ -560,7 +560,7 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
         ExitReason::UserRequested => { /* normal exit */ }
     }
 
-    let update_action = exit_info.update_action;
+    let update_action = exit_info.update_action.clone();
     let color_enabled = supports_color::on(Stream::Stdout).is_some();
     for line in format_exit_messages(exit_info, color_enabled) {
         println!("{line}");
@@ -597,10 +597,10 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
         #[cfg(not(windows))]
         {
             let (cmd, args) = action.command_args();
-            let command_path = crate::wsl_paths::normalize_for_wsl(cmd);
+            let command_path = crate::wsl_paths::normalize_for_wsl(&cmd);
             let normalized_args: Vec<String> = args
                 .iter()
-                .map(crate::wsl_paths::normalize_for_wsl)
+                .map(|arg| crate::wsl_paths::normalize_for_wsl(arg.as_str()))
                 .collect();
             std::process::Command::new(&command_path)
                 .args(&normalized_args)

@@ -39,7 +39,9 @@ pub(crate) async fn run_update_prompt_if_needed(
     let Some(latest_version) = updates::get_upgrade_version_for_popup(config) else {
         return Ok(UpdatePromptOutcome::Continue);
     };
-    let Some(update_action) = crate::update_action::get_update_action() else {
+    let Some(update_action) = crate::update_action::get_update_action()
+        .map(|action| action.with_target_version(&latest_version))
+    else {
         return Ok(UpdatePromptOutcome::Continue);
     };
 
@@ -71,7 +73,7 @@ pub(crate) async fn run_update_prompt_if_needed(
     match screen.selection() {
         Some(UpdateSelection::UpdateNow) => {
             tui.terminal.clear()?;
-            Ok(UpdatePromptOutcome::RunUpdate(update_action))
+            Ok(UpdatePromptOutcome::RunUpdate(update_action.clone()))
         }
         Some(UpdateSelection::NotNow) | None => Ok(UpdatePromptOutcome::Continue),
         Some(UpdateSelection::DontRemind) => {
@@ -253,7 +255,7 @@ mod tests {
         UpdatePromptScreen::new(
             FrameRequester::test_dummy(),
             "9.9.9".into(),
-            UpdateAction::NpmGlobalLatest,
+            UpdateAction::NpmGlobalVersion("9.9.9".into()),
         )
     }
 
