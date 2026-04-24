@@ -1623,7 +1623,7 @@ mod tests {
                 &cwd,
             )),
         );
-        assert_eq!(sandbox, Some(workspace_write.clone().into()));
+        assert_eq!(sandbox, Some(workspace_write.into()));
         assert_eq!(profile, None);
 
         let external_sandbox = SandboxPolicy::ExternalSandbox {
