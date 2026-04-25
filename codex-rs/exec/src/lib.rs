@@ -4,12 +4,14 @@
 // For both modes, any other output must be written to stderr.
 #![deny(clippy::print_stdout)]
 
+mod automode;
 mod cli;
 mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
 pub(crate) mod exec_events;
 
+pub use cli::AutomodeArgs;
 pub use cli::Cli;
 pub use cli::Command;
 pub use cli::ReviewArgs;
@@ -528,6 +530,10 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     })
     .instrument(exec_span)
     .await
+}
+
+pub async fn run_automode(args: AutomodeArgs, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    automode::run_main(args, arg0_paths).await
 }
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {

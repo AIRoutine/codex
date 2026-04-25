@@ -17,6 +17,7 @@ use codex_cli::run_login_with_chatgpt;
 use codex_cli::run_login_with_device_code;
 use codex_cli::run_logout;
 use codex_cloud_tasks::Cli as CloudTasksCli;
+use codex_exec::AutomodeArgs;
 use codex_exec::Cli as ExecCli;
 use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
@@ -103,6 +104,10 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
+    /// Run Codex autonomously against a project for a fixed duration.
+    #[clap(visible_alias = "auto")]
+    Automode(AutomodeArgs),
+
     /// Run Codex non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
@@ -744,6 +749,15 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             )
             .await?;
             handle_app_exit(exit_info)?;
+        }
+        Some(Subcommand::Automode(mut automode_args)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "automode",
+            )?;
+            automode_args.config_overrides = root_config_overrides;
+            codex_exec::run_automode(automode_args, arg0_paths.clone()).await?;
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -1766,6 +1780,29 @@ mod tests {
         );
         assert_eq!(args.session_id.as_deref(), Some("session-123"));
         assert_eq!(args.prompt.as_deref(), Some("re-review"));
+    }
+
+    #[test]
+    fn automode_parses_required_project_duration_and_goal() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "auto",
+            "--project",
+            "/tmp/repo",
+            "--duration",
+            "1h30m",
+            "--goal",
+            "ship it",
+        ])
+        .expect("parse should succeed");
+
+        let Some(Subcommand::Automode(args)) = cli.subcommand else {
+            panic!("expected automode subcommand");
+        };
+
+        assert_eq!(args.project, Some(std::path::PathBuf::from("/tmp/repo")));
+        assert_eq!(args.duration, std::time::Duration::from_secs(5400));
+        assert_eq!(args.goal, "ship it");
     }
 
     #[test]

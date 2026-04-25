@@ -5,6 +5,7 @@ use clap::ValueEnum;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SharedCliOptions;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -83,6 +84,35 @@ impl std::ops::DerefMut for Cli {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.shared.0
     }
+}
+
+#[derive(Args, Debug)]
+pub struct AutomodeArgs {
+    #[clap(flatten)]
+    pub shared: ExecSharedCliOptions,
+
+    /// Project directory automode should operate on. Equivalent to -C/--cd.
+    #[arg(long = "project", value_name = "DIR")]
+    pub project: Option<PathBuf>,
+
+    /// How long automode should keep running, for example 30m, 2h, or 1h30m.
+    #[arg(long = "duration", value_name = "DURATION", value_parser = parse_duration)]
+    pub duration: Duration,
+
+    /// Goal automode should pursue for the entire run.
+    #[arg(long = "goal", value_name = "TEXT")]
+    pub goal: String,
+
+    /// Directory for automode state. Relative paths are resolved inside the project.
+    #[arg(long = "state-dir", value_name = "DIR")]
+    pub state_dir: Option<PathBuf>,
+
+    /// Allow running automode outside a Git repository.
+    #[arg(long = "skip-git-repo-check", default_value_t = false)]
+    pub skip_git_repo_check: bool,
+
+    #[clap(skip)]
+    pub config_overrides: CliConfigOverrides,
 }
 
 #[derive(Debug, Default)]
@@ -222,6 +252,96 @@ impl Args for ResumeArgs {
 
     fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
         ResumeArgsRaw::augment_args_for_update(cmd)
+    }
+}
+
+fn parse_duration(raw: &str) -> Result<Duration, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("duration must not be empty".to_string());
+    }
+
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        let seconds = trimmed
+            .parse::<u64>()
+            .map_err(|err| format!("invalid duration `{raw}`: {err}"))?;
+        return Ok(Duration::from_secs(seconds));
+    }
+
+    let mut total_secs = 0_u64;
+    let mut digits = String::new();
+    let mut saw_segment = false;
+
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+
+        if digits.is_empty() {
+            return Err(format!("invalid duration `{raw}`"));
+        }
+
+        let value = digits
+            .parse::<u64>()
+            .map_err(|err| format!("invalid duration `{raw}`: {err}"))?;
+        digits.clear();
+
+        let multiplier = match ch {
+            's' | 'S' => 1,
+            'm' | 'M' => 60,
+            'h' | 'H' => 60 * 60,
+            'd' | 'D' => 24 * 60 * 60,
+            _ => {
+                return Err(format!(
+                    "invalid duration unit `{ch}` in `{raw}`; use s, m, h, or d"
+                ));
+            }
+        };
+
+        total_secs = total_secs
+            .checked_add(
+                value
+                    .checked_mul(multiplier)
+                    .ok_or_else(|| format!("duration `{raw}` is too large"))?,
+            )
+            .ok_or_else(|| format!("duration `{raw}` is too large"))?;
+        saw_segment = true;
+    }
+
+    if !digits.is_empty() {
+        return Err(format!(
+            "invalid duration `{raw}`; trailing number needs a unit"
+        ));
+    }
+
+    if !saw_segment || total_secs == 0 {
+        return Err(format!("invalid duration `{raw}`"));
+    }
+
+    Ok(Duration::from_secs(total_secs))
+}
+
+#[cfg(test)]
+mod automode_cli_tests {
+    use super::parse_duration;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_duration_accepts_seconds_minutes_hours_and_days() {
+        assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1800));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+        assert_eq!(parse_duration("1d2h").unwrap(), Duration::from_secs(93600));
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid_values() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("1x").is_err());
+        assert!(parse_duration("10m5").is_err());
+        assert!(parse_duration("0m").is_err());
     }
 }
 
