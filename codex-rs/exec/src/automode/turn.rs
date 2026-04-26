@@ -261,13 +261,17 @@ impl TurnCollector {
     }
 
     fn finish(self) -> TurnSummary {
+        let final_message_max_chars = match self.role {
+            TurnRole::Operator => 64 * 1024,
+            TurnRole::Worker => 4000,
+        };
         TurnSummary {
             role: self.role,
             turn_id: self.turn_id,
             status: self.status,
             final_message: self
                 .final_message
-                .map(|message| truncate_for_state(&message, 4000)),
+                .map(|message| truncate_for_state(&message, final_message_max_chars)),
             commands: truncate_vec(self.commands, 20),
             file_changes: truncate_vec(self.file_changes, 50),
             errors: truncate_vec(self.errors, 20),
@@ -290,4 +294,38 @@ fn truncate_for_state(value: &str, max_chars: usize) -> String {
     let mut truncated = value.chars().take(max_chars).collect::<String>();
     truncated.push_str("...[truncated]");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn operator_final_message_preserves_long_json_for_parsing() {
+        let long_json = format!(
+            r#"{{"metrics":[],"assessment":"{}","learned":[],"document_changes":[],"next_prompt":"continue"}}"#,
+            "x".repeat(5000)
+        );
+        let mut collector = TurnCollector::new(TurnRole::Operator, "turn".to_string());
+        collector.final_message = Some(long_json.clone());
+
+        let summary = collector.finish();
+
+        assert_eq!(summary.final_message.as_deref(), Some(long_json.as_str()));
+    }
+
+    #[test]
+    fn worker_final_message_stays_bounded_for_state_files() {
+        let long_message = "x".repeat(5000);
+        let mut collector = TurnCollector::new(TurnRole::Worker, "turn".to_string());
+        collector.final_message = Some(long_message);
+
+        let summary = collector.finish();
+        let final_message = summary.final_message.expect("final message");
+
+        assert_eq!(final_message.chars().count(), 4014);
+        assert!(final_message.ends_with("...[truncated]"));
+    }
 }
