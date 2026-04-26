@@ -384,6 +384,15 @@ pub(crate) enum AppEvent {
         result: Result<SkillsListResponse, String>,
     },
 
+    /// Start an independent automode run from the interactive TUI.
+    StartAutomode(crate::automode::AutomodeStartRequest),
+
+    /// Stop the currently running TUI-owned automode task, if any.
+    StopAutomode,
+
+    /// Render live output from a TUI-owned automode task.
+    AutomodeEvent(crate::automode::AutomodeUiEvent),
+
     InsertHistoryCell(Box<dyn HistoryCell>),
 
     /// Apply rollback semantics to local transcript cells.

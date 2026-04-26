@@ -22,7 +22,7 @@ pub enum PullEvent {
 
 /// A simple observer for pull progress events. Implementations decide how to
 /// render progress (CLI, TUI, logs, ...).
-pub trait PullProgressReporter {
+pub trait PullProgressReporter: Send {
     fn on_event(&mut self, event: &PullEvent) -> io::Result<()>;
 }
 

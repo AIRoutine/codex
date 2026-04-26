@@ -91,6 +91,7 @@ mod app_server_session;
 mod ascii_animation;
 #[cfg(not(target_os = "linux"))]
 mod audio_device;
+mod automode;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 mod audio_device {
@@ -1406,7 +1407,7 @@ async fn run_ratatui_app(
         Some(app_server) => app_server,
         None => match start_app_server(
             &app_server_target,
-            arg0_paths,
+            arg0_paths.clone(),
             config.clone(),
             cli_kv_overrides.clone(),
             loader_overrides,
@@ -1430,6 +1431,7 @@ async fn run_ratatui_app(
     let app_result = App::run(
         &mut tui,
         app_server,
+        arg0_paths,
         config,
         cli_kv_overrides.clone(),
         overrides.clone(),

@@ -114,6 +114,7 @@ use codex_app_server_protocol::ThreadStartSource;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
+use codex_arg0::Arg0DispatchPaths;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::ModelAvailabilityNuxConfig;
@@ -181,6 +182,7 @@ use uuid::Uuid;
 mod agent_navigation;
 mod app_server_adapter;
 pub(crate) mod app_server_requests;
+mod automode;
 mod background_requests;
 mod config_persistence;
 mod event_dispatch;
@@ -492,6 +494,7 @@ pub(crate) struct App {
     model_catalog: Arc<ModelCatalog>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) app_event_tx: AppEventSender,
+    automode: Box<AutomodeControllerState>,
     pub(crate) chat_widget: ChatWidget,
     /// Config is stored here so we can recreate ChatWidgets as needed.
     pub(crate) config: Config,
@@ -561,6 +564,20 @@ pub(crate) struct App {
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
     pending_plugin_enabled_writes: HashMap<String, Option<bool>>,
+}
+
+struct AutomodeControllerState {
+    arg0_paths: Arg0DispatchPaths,
+    task: Option<JoinHandle<()>>,
+}
+
+impl AutomodeControllerState {
+    fn new(arg0_paths: Arg0DispatchPaths) -> Self {
+        Self {
+            arg0_paths,
+            task: None,
+        }
+    }
 }
 
 fn active_turn_not_steerable_turn_error(error: &TypedRequestError) -> Option<AppServerTurnError> {
@@ -637,6 +654,7 @@ impl App {
     pub async fn run(
         tui: &mut tui::Tui,
         mut app_server: AppServerSession,
+        arg0_paths: Arg0DispatchPaths,
         mut config: Config,
         cli_kv_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
@@ -881,6 +899,7 @@ impl App {
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
+            automode: Box::new(AutomodeControllerState::new(arg0_paths)),
             chat_widget,
             config,
             active_profile,
@@ -1145,6 +1164,9 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        if let Some(handle) = self.automode.task.take() {
+            handle.abort();
+        }
         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
         }

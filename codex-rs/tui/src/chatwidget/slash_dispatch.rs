@@ -221,6 +221,12 @@ impl ChatWidget {
                     );
                 }
             }
+            SlashCommand::Automode => {
+                self.add_info_message(
+                    crate::automode::AUTOMODE_USAGE.to_string(),
+                    Some("Example: /automode 10m improve test coverage".to_string()),
+                );
+            }
             SlashCommand::Collab => {
                 if !self.collaboration_modes_enabled() {
                     self.add_info_message(
@@ -681,6 +687,17 @@ impl ChatWidget {
                     self.bottom_pane.drain_pending_submission_state();
                 }
             }
+            SlashCommand::Automode if !trimmed.is_empty() => {
+                match crate::automode::parse_automode_slash_args(trimmed, &self.config.cwd) {
+                    Ok(crate::automode::AutomodeSlashCommand::Start(request)) => {
+                        self.app_event_tx.send(AppEvent::StartAutomode(request));
+                    }
+                    Ok(crate::automode::AutomodeSlashCommand::Stop) => {
+                        self.app_event_tx.send(AppEvent::StopAutomode);
+                    }
+                    Err(message) => self.add_error_message(message),
+                }
+            }
             SlashCommand::Side if !trimmed.is_empty() => {
                 let Some(parent_thread_id) = self.thread_id else {
                     self.add_error_message(
@@ -855,6 +872,7 @@ impl ChatWidget {
             | SlashCommand::Personality
             | SlashCommand::Plan
             | SlashCommand::Goal
+            | SlashCommand::Automode
             | SlashCommand::Collab
             | SlashCommand::Side
             | SlashCommand::Agent

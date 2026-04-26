@@ -1,0 +1,10 @@
+---
+source: tui/src/automode.rs
+assertion_line: 422
+expression: render_lines(&render_automode_event(&event))
+---
+Automode operator decision for iteration 2
+  metrics: coverage_percent=71.5/80 percent
+  assessment: Coverage improved and the next validation target is clear.
+  next: Add focused tests for the remaining parser edge cases.
+  progress: /work/project/.codex/automode/progress.md

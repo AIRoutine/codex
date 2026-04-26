@@ -1785,6 +1785,38 @@ async fn slash_mcp_invalid_args_show_usage() {
 }
 
 #[tokio::test]
+async fn slash_automode_with_args_requests_start() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(
+        SlashCommand::Automode,
+        "10m improve test coverage".to_string(),
+        Vec::new(),
+    );
+
+    match rx.try_recv() {
+        Ok(AppEvent::StartAutomode(request)) => {
+            assert_eq!(request.project, chat.config.cwd.to_path_buf());
+            assert_eq!(request.duration, std::time::Duration::from_secs(600));
+            assert_eq!(request.goal, "improve test coverage");
+            assert!(!request.skip_git_repo_check);
+        }
+        other => panic!("expected StartAutomode event, got {other:?}"),
+    }
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn slash_automode_stop_requests_stop() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Automode, "stop".to_string(), Vec::new());
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::StopAutomode));
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
 async fn slash_memories_opens_memory_menu() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);

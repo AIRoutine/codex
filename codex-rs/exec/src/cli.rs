@@ -96,7 +96,7 @@ pub struct AutomodeArgs {
     pub project: Option<PathBuf>,
 
     /// How long automode should keep running, for example 30m, 2h, or 1h30m.
-    #[arg(long = "duration", value_name = "DURATION", value_parser = parse_duration)]
+    #[arg(long = "duration", value_name = "DURATION", value_parser = parse_automode_duration)]
     pub duration: Duration,
 
     /// Goal automode should pursue for the entire run.
@@ -255,7 +255,7 @@ impl Args for ResumeArgs {
     }
 }
 
-fn parse_duration(raw: &str) -> Result<Duration, String> {
+pub fn parse_automode_duration(raw: &str) -> Result<Duration, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("duration must not be empty".to_string());
@@ -324,24 +324,39 @@ fn parse_duration(raw: &str) -> Result<Duration, String> {
 
 #[cfg(test)]
 mod automode_cli_tests {
-    use super::parse_duration;
+    use super::parse_automode_duration;
     use std::time::Duration;
 
     #[test]
     fn parse_duration_accepts_seconds_minutes_hours_and_days() {
-        assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
-        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1800));
-        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
-        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
-        assert_eq!(parse_duration("1d2h").unwrap(), Duration::from_secs(93600));
+        assert_eq!(
+            parse_automode_duration("45").unwrap(),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            parse_automode_duration("30m").unwrap(),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            parse_automode_duration("2h").unwrap(),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(
+            parse_automode_duration("1h30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            parse_automode_duration("1d2h").unwrap(),
+            Duration::from_secs(93600)
+        );
     }
 
     #[test]
     fn parse_duration_rejects_invalid_values() {
-        assert!(parse_duration("").is_err());
-        assert!(parse_duration("1x").is_err());
-        assert!(parse_duration("10m5").is_err());
-        assert!(parse_duration("0m").is_err());
+        assert!(parse_automode_duration("").is_err());
+        assert!(parse_automode_duration("1x").is_err());
+        assert!(parse_automode_duration("10m5").is_err());
+        assert!(parse_automode_duration("0m").is_err());
     }
 }
 

@@ -11,10 +11,16 @@ mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
 pub(crate) mod exec_events;
 
+pub use automode::AutomodeEvent;
+pub use automode::AutomodeEventSink;
+pub use automode::AutomodeMetricSnapshot;
+pub use automode::AutomodeTurnSummarySnapshot;
 pub use cli::AutomodeArgs;
 pub use cli::Cli;
 pub use cli::Command;
+pub use cli::ExecSharedCliOptions;
 pub use cli::ReviewArgs;
+pub use cli::parse_automode_duration;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::EnvironmentManager;
 use codex_app_server_client::EnvironmentManagerArgs;
@@ -534,6 +540,14 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
 pub async fn run_automode(args: AutomodeArgs, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     automode::run_main(args, arg0_paths).await
+}
+
+pub async fn run_automode_with_events(
+    args: AutomodeArgs,
+    arg0_paths: Arg0DispatchPaths,
+    event_sink: Option<AutomodeEventSink>,
+) -> anyhow::Result<()> {
+    automode::run_main_with_events(args, arg0_paths, event_sink).await
 }
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {

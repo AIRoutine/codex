@@ -178,6 +178,16 @@ impl App {
 
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::StartAutomode(request) => {
+                self.start_automode(tui, request);
+            }
+            AppEvent::StopAutomode => {
+                self.stop_automode(tui);
+            }
+            AppEvent::AutomodeEvent(event) => {
+                self.handle_automode_event(event);
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::InsertHistoryCell(cell) => {
                 let cell: Arc<dyn HistoryCell> = cell.into();
                 if let Some(Overlay::Transcript(t)) = &mut self.overlay {

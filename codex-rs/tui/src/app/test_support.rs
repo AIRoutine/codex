@@ -18,6 +18,7 @@ pub(super) async fn make_test_app() -> App {
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
         app_event_tx,
+        automode: Box::new(AutomodeControllerState::new(Arg0DispatchPaths::default())),
         chat_widget,
         config,
         active_profile: None,

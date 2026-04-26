@@ -6,6 +6,8 @@ mod types;
 
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
 use codex_app_server_client::InProcessAppServerClient;
@@ -40,10 +42,98 @@ use self::state::unix_timestamp_secs;
 use self::state::write_state;
 use self::turn::run_turn;
 use self::types::AutomodeDecision;
+use self::types::AutomodeMetric;
+use self::types::MetricDirection;
 use self::types::TurnRole;
 use self::types::TurnSummary;
 
+#[derive(Clone)]
+pub struct AutomodeEventSink {
+    handler: Arc<dyn Fn(AutomodeEvent) + Send + Sync + 'static>,
+}
+
+impl std::fmt::Debug for AutomodeEventSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutomodeEventSink").finish_non_exhaustive()
+    }
+}
+
+impl AutomodeEventSink {
+    pub fn new<F>(handler: F) -> Self
+    where
+        F: Fn(AutomodeEvent) + Send + Sync + 'static,
+    {
+        Self {
+            handler: Arc::new(handler),
+        }
+    }
+
+    fn emit(&self, event: AutomodeEvent) {
+        (self.handler)(event);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AutomodeEvent {
+    Started {
+        goal: String,
+        project: PathBuf,
+        state_dir: PathBuf,
+        progress_path: PathBuf,
+        deadline_at: i64,
+    },
+    OperatorTurnStarted {
+        iteration: u64,
+    },
+    OperatorDecision {
+        iteration: u64,
+        progress_path: PathBuf,
+        assessment: String,
+        metrics: Vec<AutomodeMetricSnapshot>,
+        next_prompt: String,
+    },
+    WorkerTurnStarted {
+        iteration: u64,
+    },
+    WorkerTurnCompleted {
+        iteration: u64,
+        summary: AutomodeTurnSummarySnapshot,
+    },
+    Finished {
+        iteration: u64,
+        progress_path: PathBuf,
+        error_seen: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomodeMetricSnapshot {
+    pub name: String,
+    pub current: f64,
+    pub target: f64,
+    pub unit: String,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomodeTurnSummarySnapshot {
+    pub role: String,
+    pub status: String,
+    pub final_message: Option<String>,
+    pub commands: Vec<String>,
+    pub file_changes: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 pub async fn run_main(args: AutomodeArgs, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    run_main_with_events(args, arg0_paths, None).await
+}
+
+pub async fn run_main_with_events(
+    args: AutomodeArgs,
+    arg0_paths: Arg0DispatchPaths,
+    event_sink: Option<AutomodeEventSink>,
+) -> anyhow::Result<()> {
     if let Err(err) =
         codex_login::default_client::set_default_originator("codex_automode".to_string())
     {
@@ -51,10 +141,13 @@ pub async fn run_main(args: AutomodeArgs, arg0_paths: Arg0DispatchPaths) -> anyh
     }
 
     let runtime = AutomodeRuntime::build(args, arg0_paths).await?;
-    run_loop(runtime).await
+    run_loop(runtime, event_sink).await
 }
 
-async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
+async fn run_loop(
+    runtime: AutomodeRuntime,
+    event_sink: Option<AutomodeEventSink>,
+) -> anyhow::Result<()> {
     let AutomodeRuntime {
         args,
         config,
@@ -82,11 +175,21 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
         &state_dir,
         json!({
             "type": "automode.started",
-            "goal": goal,
+            "goal": goal.clone(),
             "project": project.to_string_lossy(),
             "deadlineAt": deadline_at,
         }),
     )?;
+    emit_event(
+        &event_sink,
+        AutomodeEvent::Started {
+            goal: goal.clone(),
+            project: project.to_path_buf(),
+            state_dir: state_dir.clone(),
+            progress_path: state_dir.join(PROGRESS_DOC_FILE),
+            deadline_at,
+        },
+    );
 
     let mut request_ids = RequestIdSequencer::new();
     let mut client = InProcessAppServerClient::start(in_process_start_args)
@@ -121,6 +224,12 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
     );
 
     let mut error_seen = false;
+    emit_event(
+        &event_sink,
+        AutomodeEvent::OperatorTurnStarted {
+            iteration: state.iteration,
+        },
+    );
     let first_decision = run_operator_turn(
         &mut client,
         &mut request_ids,
@@ -133,12 +242,19 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
         deadline,
     )
     .await?;
-    apply_decision(&state_dir, &mut state, first_decision)?;
+    apply_decision(&state_dir, &mut state, first_decision.clone())?;
+    emit_operator_decision(&event_sink, state.iteration, &state_dir, &first_decision);
 
     while Instant::now() < deadline {
         let next_prompt = next_worker_prompt(&state, &state_dir);
         state.iteration = state.iteration.saturating_add(1);
         write_state(&state_dir, &state)?;
+        emit_event(
+            &event_sink,
+            AutomodeEvent::WorkerTurnStarted {
+                iteration: state.iteration,
+            },
+        );
 
         let worker_summary = run_worker_turn(
             &mut client,
@@ -158,6 +274,13 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
                 "summary": worker_summary,
             }),
         )?;
+        emit_event(
+            &event_sink,
+            AutomodeEvent::WorkerTurnCompleted {
+                iteration: state.iteration,
+                summary: AutomodeTurnSummarySnapshot::from_summary(&worker_summary),
+            },
+        );
         state.last_worker_summary = Some(worker_summary.clone());
         write_state(&state_dir, &state)?;
 
@@ -165,6 +288,12 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
             break;
         }
 
+        emit_event(
+            &event_sink,
+            AutomodeEvent::OperatorTurnStarted {
+                iteration: state.iteration,
+            },
+        );
         let decision = run_operator_turn(
             &mut client,
             &mut request_ids,
@@ -177,7 +306,8 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
             deadline,
         )
         .await?;
-        apply_decision(&state_dir, &mut state, decision)?;
+        apply_decision(&state_dir, &mut state, decision.clone())?;
+        emit_operator_decision(&event_sink, state.iteration, &state_dir, &decision);
     }
 
     append_event(
@@ -188,6 +318,14 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
             "errorSeen": error_seen,
         }),
     )?;
+    emit_event(
+        &event_sink,
+        AutomodeEvent::Finished {
+            iteration: state.iteration,
+            progress_path: state_dir.join(PROGRESS_DOC_FILE),
+            error_seen,
+        },
+    );
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
     }
@@ -198,6 +336,68 @@ async fn run_loop(runtime: AutomodeRuntime) -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+fn emit_event(event_sink: &Option<AutomodeEventSink>, event: AutomodeEvent) {
+    if let Some(event_sink) = event_sink {
+        event_sink.emit(event);
+    }
+}
+
+fn emit_operator_decision(
+    event_sink: &Option<AutomodeEventSink>,
+    iteration: u64,
+    state_dir: &Path,
+    decision: &AutomodeDecision,
+) {
+    emit_event(
+        event_sink,
+        AutomodeEvent::OperatorDecision {
+            iteration,
+            progress_path: state_dir.join(PROGRESS_DOC_FILE),
+            assessment: decision.assessment.clone(),
+            metrics: decision
+                .metrics
+                .iter()
+                .map(AutomodeMetricSnapshot::from_metric)
+                .collect(),
+            next_prompt: decision.next_prompt.clone(),
+        },
+    );
+}
+
+impl AutomodeMetricSnapshot {
+    fn from_metric(metric: &AutomodeMetric) -> Self {
+        Self {
+            name: metric.name.clone(),
+            current: metric.current,
+            target: metric.target,
+            unit: metric.unit.clone(),
+            direction: match &metric.direction {
+                MetricDirection::Increase => "increase",
+                MetricDirection::Decrease => "decrease",
+                MetricDirection::Equal => "equal",
+            }
+            .to_string(),
+        }
+    }
+}
+
+impl AutomodeTurnSummarySnapshot {
+    fn from_summary(summary: &TurnSummary) -> Self {
+        Self {
+            role: match summary.role {
+                TurnRole::Operator => "operator",
+                TurnRole::Worker => "worker",
+            }
+            .to_string(),
+            status: summary.status.clone(),
+            final_message: summary.final_message.clone(),
+            commands: summary.commands.clone(),
+            file_changes: summary.file_changes.clone(),
+            errors: summary.errors.clone(),
+        }
+    }
 }
 
 #[expect(

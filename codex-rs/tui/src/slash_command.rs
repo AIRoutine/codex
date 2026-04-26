@@ -32,6 +32,7 @@ pub enum SlashCommand {
     Compact,
     Plan,
     Goal,
+    Automode,
     Collab,
     Agent,
     Side,
@@ -106,6 +107,7 @@ impl SlashCommand {
             SlashCommand::Settings => "configure realtime microphone/speaker",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
+            SlashCommand::Automode => "run automode in this workspace",
             SlashCommand::Collab => "change collaboration mode (experimental)",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
             SlashCommand::Side => "start a side conversation in an ephemeral fork",
@@ -140,6 +142,7 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Goal
+                | SlashCommand::Automode
                 | SlashCommand::Fast
                 | SlashCommand::Mcp
                 | SlashCommand::Side
@@ -176,6 +179,7 @@ impl SlashCommand {
             | SlashCommand::Memories
             | SlashCommand::Review
             | SlashCommand::Plan
+            | SlashCommand::Automode
             | SlashCommand::Clear
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
