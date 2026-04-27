@@ -1801,6 +1801,7 @@ async fn slash_automode_with_args_requests_start() {
             assert_eq!(request.goal, "improve test coverage");
             assert!(!request.skip_git_repo_check);
             assert!(!request.resume);
+            assert_eq!(request.run_name, None);
         }
         other => panic!("expected StartAutomode event, got {other:?}"),
     }

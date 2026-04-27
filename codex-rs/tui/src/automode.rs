@@ -20,6 +20,7 @@ pub(crate) struct AutomodeStartRequest {
     pub(crate) goal: String,
     pub(crate) skip_git_repo_check: bool,
     pub(crate) resume: bool,
+    pub(crate) run_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,7 @@ pub(crate) enum AutomodeSlashCommand {
 #[derive(Debug)]
 pub(crate) struct AutomodeRunState {
     request: AutomodeStartRequest,
+    run_name: String,
     state_dir: PathBuf,
     progress_path: PathBuf,
     deadline: Option<Instant>,
@@ -45,7 +47,13 @@ pub(crate) struct AutomodeTurnPrompt {
     pub(crate) cwd: PathBuf,
 }
 
-pub(crate) const AUTOMODE_USAGE: &str = "Usage: /automode [<duration>] <goal> [--project DIR] [--skip-git-repo-check] | /automode resume [--duration DURATION] [--project DIR]";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunScan {
+    AllEntries,
+    DirectoriesOnly,
+}
+
+pub(crate) const AUTOMODE_USAGE: &str = "Usage: /automode [<duration>] <goal> [--project DIR] [--skip-git-repo-check] | /automode resume [RUN] [--duration DURATION] [--project DIR]";
 
 pub(crate) fn parse_automode_slash_args(
     raw: &str,
@@ -135,6 +143,7 @@ pub(crate) fn parse_automode_slash_args(
         goal,
         skip_git_repo_check,
         resume: false,
+        run_name: None,
     }))
 }
 
@@ -145,6 +154,7 @@ fn parse_resume_args(
     let mut project = default_project.to_path_buf();
     let mut duration = None;
     let mut skip_git_repo_check = false;
+    let mut run_name = None;
     let mut index = 0;
 
     while index < tokens.len() {
@@ -163,14 +173,34 @@ fn parse_resume_args(
                 duration = Some(parse_automode_duration(value)?);
                 index += 2;
             }
+            "--run" | "--name" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("Missing value after --run.".to_string());
+                };
+                run_name = Some(validate_run_name(value)?);
+                index += 2;
+            }
             "--skip-git-repo-check" => {
                 skip_git_repo_check = true;
                 index += 1;
             }
-            token if duration.is_none() => {
-                duration = Some(parse_automode_duration(token).map_err(|err| {
-                    format!("{err}. Resume accepts only an optional duration and flags.")
-                })?);
+            token if duration.is_none() => match parse_automode_duration(token) {
+                Ok(parsed_duration) => {
+                    duration = Some(parsed_duration);
+                    index += 1;
+                }
+                Err(_) if run_name.is_none() => {
+                    run_name = Some(validate_run_name(token)?);
+                    index += 1;
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "{err}. Resume accepts one run name, one optional duration, and flags."
+                    ));
+                }
+            },
+            token if run_name.is_none() => {
+                run_name = Some(validate_run_name(token)?);
                 index += 1;
             }
             token => {
@@ -183,18 +213,21 @@ fn parse_resume_args(
         return Err("Duration must be greater than zero.".to_string());
     }
 
-    let goal = read_resume_goal(&project)?;
+    let run_name = resolve_resume_run_name(&project, run_name)?;
+    let goal = read_resume_goal(&project, &run_name)?;
     Ok(AutomodeSlashCommand::Start(AutomodeStartRequest {
         project,
         duration,
         goal,
         skip_git_repo_check,
         resume: true,
+        run_name: Some(run_name),
     }))
 }
 
 impl AutomodeRunState {
     pub(crate) fn start(request: AutomodeStartRequest, run_id: u64) -> Result<Self, String> {
+        let mut request = request;
         if !request.project.is_dir() {
             return Err(format!(
                 "Automode project does not exist or is not a directory: {}",
@@ -208,7 +241,21 @@ impl AutomodeRunState {
             );
         }
 
-        let state_dir = request.project.join(".codex").join("automode");
+        let automode_root = automode_root(&request.project);
+        fs::create_dir_all(&automode_root)
+            .map_err(|err| format!("Failed to create {}: {err}", automode_root.display()))?;
+        let run_name = if request.resume {
+            request
+                .run_name
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| resolve_resume_run_name(&request.project, None))?
+        } else {
+            next_run_name(&automode_root)?
+        };
+        request.run_name = Some(run_name.clone());
+
+        let state_dir = automode_root.join(&run_name);
         fs::create_dir_all(&state_dir)
             .map_err(|err| format!("Failed to create {}: {err}", state_dir.display()))?;
 
@@ -216,7 +263,7 @@ impl AutomodeRunState {
         if !progress_path.exists() {
             fs::write(
                 &progress_path,
-                initial_progress_document(&request.goal, &request.project),
+                initial_progress_document(&request.goal, &request.project, &run_name),
             )
             .map_err(|err| format!("Failed to write {}: {err}", progress_path.display()))?;
         }
@@ -231,6 +278,7 @@ impl AutomodeRunState {
 
         Ok(Self {
             request,
+            run_name,
             state_dir,
             progress_path,
             deadline,
@@ -261,6 +309,7 @@ impl AutomodeRunState {
         let iteration = self.iteration;
         let prompt = build_turn_prompt(
             &self.request,
+            &self.run_name,
             &self.state_dir,
             &self.progress_path,
             iteration,
@@ -286,24 +335,33 @@ impl AutomodeRunState {
 }
 
 pub(crate) fn format_automode_command(request: &AutomodeStartRequest) -> String {
-    let command = if request.resume { "resume" } else { "--goal" };
-    match (request.resume, request.duration) {
-        (true, Some(duration)) => format!(
-            "/automode {command} --project {} --duration {}",
+    match (
+        request.resume,
+        request.duration,
+        request.run_name.as_deref(),
+    ) {
+        (true, Some(duration), Some(run_name)) => format!(
+            "/automode resume {run_name} --project {} --duration {}",
             request.project.display(),
             format_duration(duration)
         ),
-        (true, None) => format!(
-            "/automode {command} --project {}",
+        (true, None, Some(run_name)) => format!(
+            "/automode resume {run_name} --project {}",
             request.project.display()
         ),
-        (false, Some(duration)) => format!(
+        (true, Some(duration), None) => format!(
+            "/automode resume --project {} --duration {}",
+            request.project.display(),
+            format_duration(duration)
+        ),
+        (true, None, None) => format!("/automode resume --project {}", request.project.display()),
+        (false, Some(duration), _) => format!(
             "/automode --project {} --duration {} --goal {}",
             request.project.display(),
             format_duration(duration),
             request.goal
         ),
-        (false, None) => format!(
+        (false, None, _) => format!(
             "/automode --project {} --goal {}",
             request.project.display(),
             request.goal
@@ -330,6 +388,7 @@ pub(crate) fn automode_started_lines(state: &AutomodeRunState) -> Vec<Line<'stat
             state.progress_path.display().to_string().cyan(),
         ]
         .into(),
+        vec!["  run: ".dim(), state.run_name.clone().cyan()].into(),
         vec![
             "  duration: ".dim(),
             match state.request.duration {
@@ -386,17 +445,24 @@ fn starts_with_ascii_digit(value: &str) -> bool {
     value.as_bytes().first().is_some_and(u8::is_ascii_digit)
 }
 
-fn read_resume_goal(project: &Path) -> Result<String, String> {
-    let state_dir = project.join(".codex").join("automode");
-    read_goal_from_tui_state(&state_dir)
-        .or_else(|| read_goal_from_exec_state(&state_dir))
+fn automode_root(project: &Path) -> PathBuf {
+    project.join(".codex").join("automode")
+}
+
+fn read_resume_goal(project: &Path, run_name: &str) -> Result<String, String> {
+    let state_dir = automode_root(project).join(run_name);
+    read_goal_from_state_dir(&state_dir).ok_or_else(|| {
+        format!(
+            "Could not resume automode run {run_name}. No goal found in {}.",
+            state_dir.display()
+        )
+    })
+}
+
+fn read_goal_from_state_dir(state_dir: &Path) -> Option<String> {
+    read_goal_from_tui_state(state_dir)
+        .or_else(|| read_goal_from_exec_state(state_dir))
         .or_else(|| read_goal_from_progress_doc(&state_dir.join(PROGRESS_DOC_FILE)))
-        .ok_or_else(|| {
-            format!(
-                "Could not resume automode. No goal found in {}.",
-                state_dir.display()
-            )
-        })
 }
 
 fn read_goal_from_tui_state(state_dir: &Path) -> Option<String> {
@@ -433,11 +499,122 @@ fn read_goal_from_progress_doc(progress_path: &Path) -> Option<String> {
     })
 }
 
+fn resolve_resume_run_name(project: &Path, requested: Option<String>) -> Result<String, String> {
+    let root = automode_root(project);
+    if let Some(run_name) = requested {
+        if read_goal_from_state_dir(&root.join(&run_name)).is_some() {
+            return Ok(run_name);
+        }
+        if run_name == "run1"
+            && latest_run_name(&root)?.is_none()
+            && migrate_legacy_resume_run(&root)?.is_some()
+        {
+            return Ok(run_name);
+        }
+        return Ok(run_name);
+    }
+
+    if let Some(run_name) = latest_run_name(&root)? {
+        return Ok(run_name);
+    }
+    if let Some(run_name) = migrate_legacy_resume_run(&root)? {
+        return Ok(run_name);
+    }
+
+    Err(format!(
+        "Could not resume automode. No runs found in {}.",
+        root.display()
+    ))
+}
+
+fn validate_run_name(value: &str) -> Result<String, String> {
+    parse_run_number(value)
+        .map(|_| value.to_string())
+        .ok_or_else(|| "Run name must look like run1, run2, ...".to_string())
+}
+
+fn next_run_name(root: &Path) -> Result<String, String> {
+    let next = match max_run_number(root, RunScan::AllEntries)? {
+        Some(number) => number
+            .checked_add(1)
+            .ok_or_else(|| "Automode run number overflowed.".to_string())?,
+        None => 1,
+    };
+    Ok(format!("run{next}"))
+}
+
+fn latest_run_name(root: &Path) -> Result<Option<String>, String> {
+    Ok(max_run_number(root, RunScan::DirectoriesOnly)?.map(|number| format!("run{number}")))
+}
+
+fn max_run_number(root: &Path, scan: RunScan) -> Result<Option<u64>, String> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("Failed to read {}: {err}", root.display())),
+    };
+    let mut max = None;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("Failed to read {}: {err}", root.display()))?;
+        if scan == RunScan::DirectoriesOnly {
+            let file_type = entry.file_type().map_err(|err| {
+                format!(
+                    "Failed to read metadata for {}: {err}",
+                    entry.path().display()
+                )
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(number) = parse_run_number(&name) else {
+            continue;
+        };
+        max = Some(max.map_or(number, |previous: u64| previous.max(number)));
+    }
+    Ok(max)
+}
+
+fn parse_run_number(value: &str) -> Option<u64> {
+    let suffix = value.strip_prefix("run")?;
+    let number = suffix.parse::<u64>().ok()?;
+    (number > 0 && value == format!("run{number}")).then_some(number)
+}
+
+fn migrate_legacy_resume_run(root: &Path) -> Result<Option<String>, String> {
+    if read_goal_from_state_dir(root).is_none() {
+        return Ok(None);
+    }
+
+    let run_name = "run1";
+    let run_dir = root.join(run_name);
+    fs::create_dir_all(&run_dir)
+        .map_err(|err| format!("Failed to create {}: {err}", run_dir.display()))?;
+    for file_name in [PROGRESS_DOC_FILE, TUI_STATE_FILE, EXEC_STATE_FILE] {
+        let source = root.join(file_name);
+        let target = run_dir.join(file_name);
+        if source.is_file() && !target.exists() {
+            fs::copy(&source, &target).map_err(|err| {
+                format!(
+                    "Failed to copy {} to {}: {err}",
+                    source.display(),
+                    target.display()
+                )
+            })?;
+        }
+    }
+    Ok(Some(run_name.to_string()))
+}
+
 fn write_tui_state(state_dir: &Path, request: &AutomodeStartRequest) -> Result<(), String> {
     let path = state_dir.join(TUI_STATE_FILE);
     let contents = serde_json::to_vec_pretty(&serde_json::json!({
         "goal": request.goal.as_str(),
         "project": request.project.to_string_lossy(),
+        "run_name": request.run_name.as_deref(),
     }))
     .map_err(|err| format!("Failed to serialize {}: {err}", path.display()))?;
     fs::write(&path, contents).map_err(|err| format!("Failed to write {}: {err}", path.display()))
@@ -452,13 +629,16 @@ fn resolve_project_arg(raw: &str, default_project: &Path) -> PathBuf {
     }
 }
 
-fn initial_progress_document(goal: &str, project: &Path) -> String {
+fn initial_progress_document(goal: &str, project: &Path, run_name: &str) -> String {
+    let project = project.display();
     format!(
         r#"# Automode Progress
 
 Goal: {goal}
 
 Project: {project}
+
+Run: {run_name}
 
 The simulated operator must keep this document current after every turn.
 
@@ -476,13 +656,13 @@ Define fixed numeric metrics here before doing substantial work. Each metric mus
 ## Iteration Log
 
 No iterations have been recorded yet.
-"#,
-        project = project.display()
+"#
     )
 }
 
 fn build_turn_prompt(
     request: &AutomodeStartRequest,
+    run_name: &str,
     state_dir: &Path,
     progress_path: &Path,
     iteration: u64,
@@ -493,6 +673,10 @@ fn build_turn_prompt(
     } else {
         format_duration(remaining)
     };
+    let goal = &request.goal;
+    let project = request.project.display();
+    let progress_path = progress_path.display();
+    let state_dir = state_dir.display();
     format!(
         r#"You are running inside Codex automode in the interactive TUI.
 
@@ -501,6 +685,9 @@ Project:
 
 Goal:
 {goal}
+
+Automode run:
+{run_name}
 
 Automode state directory:
 {state_dir}
@@ -520,11 +707,7 @@ Before doing new work:
 4. Decide the single best next step.
 
 Then execute that next step immediately. Do not ask the user for input. If the goal appears complete, use the remaining turn to improve verification, source quality, documentation, reproducibility, or the final report in a measurable way. Keep working until this turn ends; the controller will decide whether to start another turn.
-"#,
-        project = request.project.display(),
-        goal = request.goal,
-        state_dir = state_dir.display(),
-        progress_path = progress_path.display(),
+"#
     )
 }
 
@@ -572,6 +755,7 @@ mod tests {
                 goal: "find the best beach destination".to_string(),
                 skip_git_repo_check: false,
                 resume: false,
+                run_name: None,
             })
         );
     }
@@ -592,6 +776,7 @@ mod tests {
                 goal: "find the best beach destination".to_string(),
                 skip_git_repo_check: false,
                 resume: false,
+                run_name: None,
             })
         );
     }
@@ -612,6 +797,7 @@ mod tests {
                 goal: "run validation".to_string(),
                 skip_git_repo_check: true,
                 resume: false,
+                run_name: None,
             })
         );
     }
@@ -638,6 +824,7 @@ mod tests {
                 goal: "resume this goal".to_string(),
                 skip_git_repo_check: false,
                 resume: true,
+                run_name: Some("run1".to_string()),
             })
         );
     }
@@ -665,7 +852,124 @@ mod tests {
                 goal: "resume forever".to_string(),
                 skip_git_repo_check: false,
                 resume: true,
+                run_name: Some("run1".to_string()),
             })
+        );
+    }
+
+    #[test]
+    fn parses_resume_with_explicit_run_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        write_run_goal(project, "run1", "first goal");
+        write_run_goal(project, "run2", "second goal");
+
+        let command = parse_automode_slash_args("resume run1 --duration 30m", project).unwrap();
+
+        assert_eq!(
+            command,
+            AutomodeSlashCommand::Start(AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: Some(Duration::from_secs(1800)),
+                goal: "first goal".to_string(),
+                skip_git_repo_check: false,
+                resume: true,
+                run_name: Some("run1".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_resume_with_run_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        write_run_goal(project, "run1", "first goal");
+        write_run_goal(project, "run2", "second goal");
+
+        let command = parse_automode_slash_args("resume --run run2", project).unwrap();
+
+        assert_eq!(
+            command,
+            AutomodeSlashCommand::Start(AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: None,
+                goal: "second goal".to_string(),
+                skip_git_repo_check: false,
+                resume: true,
+                run_name: Some("run2".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn resume_without_run_name_uses_latest_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        write_run_goal(project, "run1", "first goal");
+        write_run_goal(project, "run2", "second goal");
+
+        let command = parse_automode_slash_args("resume", project).unwrap();
+
+        assert_eq!(
+            command,
+            AutomodeSlashCommand::Start(AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: None,
+                goal: "second goal".to_string(),
+                skip_git_repo_check: false,
+                resume: true,
+                run_name: Some("run2".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn new_runs_use_next_numbered_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+
+        let first = AutomodeRunState::start(
+            AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: None,
+                goal: "first goal".to_string(),
+                skip_git_repo_check: true,
+                resume: false,
+                run_name: None,
+            },
+            1,
+        )
+        .unwrap();
+        let second = AutomodeRunState::start(
+            AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: None,
+                goal: "second goal".to_string(),
+                skip_git_repo_check: true,
+                resume: false,
+                run_name: None,
+            },
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(first.run_name, "run1");
+        assert_eq!(
+            first.progress_path,
+            project
+                .join(".codex")
+                .join("automode")
+                .join("run1")
+                .join(PROGRESS_DOC_FILE)
+        );
+        assert_eq!(second.run_name, "run2");
+        assert_eq!(
+            second.progress_path,
+            project
+                .join(".codex")
+                .join("automode")
+                .join("run2")
+                .join(PROGRESS_DOC_FILE)
         );
     }
 
@@ -691,18 +995,21 @@ mod tests {
             goal: "ship the feature".to_string(),
             skip_git_repo_check: true,
             resume: false,
+            run_name: Some("run1".to_string()),
         };
 
         let prompt = build_turn_prompt(
             &request,
-            Path::new("/work/project/.codex/automode"),
-            Path::new("/work/project/.codex/automode/progress.md"),
+            "run1",
+            Path::new("/work/project/.codex/automode/run1"),
+            Path::new("/work/project/.codex/automode/run1/progress.md"),
             3,
             Duration::from_secs(120),
         );
 
         assert!(prompt.contains("Iteration: 3"));
-        assert!(prompt.contains("/work/project/.codex/automode/progress.md"));
+        assert!(prompt.contains("Automode run:\nrun1"));
+        assert!(prompt.contains("/work/project/.codex/automode/run1/progress.md"));
         assert!(prompt.contains("Read the progress document"));
     }
 
@@ -714,11 +1021,13 @@ mod tests {
             goal: "ship the feature".to_string(),
             skip_git_repo_check: true,
             resume: false,
+            run_name: Some("run1".to_string()),
         };
         let state = AutomodeRunState {
             request,
-            state_dir: PathBuf::from("/work/project/.codex/automode"),
-            progress_path: PathBuf::from("/work/project/.codex/automode/progress.md"),
+            run_name: "run1".to_string(),
+            state_dir: PathBuf::from("/work/project/.codex/automode/run1"),
+            progress_path: PathBuf::from("/work/project/.codex/automode/run1/progress.md"),
             deadline: Some(Instant::now()),
             iteration: 0,
             run_id: 1,
@@ -744,5 +1053,16 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    fn write_run_goal(project: &Path, run_name: &str, goal: &str) {
+        let state_dir = project.join(".codex").join("automode").join(run_name);
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join(TUI_STATE_FILE),
+            serde_json::json!({ "goal": goal, "project": project.display().to_string() })
+                .to_string(),
+        )
+        .unwrap();
     }
 }

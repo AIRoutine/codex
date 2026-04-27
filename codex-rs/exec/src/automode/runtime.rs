@@ -84,7 +84,7 @@ impl AutomodeRuntime {
             shared.dangerously_bypass_approvals_and_sandbox,
         );
 
-        let state_dir = resolve_state_dir(&project, state_dir);
+        let state_dir = resolve_state_dir(&project, state_dir)?;
         let codex_home = find_codex_home().context("Error finding codex home")?;
         let cli_kv_overrides = config_overrides
             .parse_overrides()

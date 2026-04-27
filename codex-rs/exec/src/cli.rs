@@ -103,7 +103,7 @@ pub struct AutomodeArgs {
     #[arg(long = "goal", value_name = "TEXT")]
     pub goal: String,
 
-    /// Directory for automode state. Relative paths are resolved inside the project.
+    /// Exact directory for automode state. Relative paths are resolved inside the project.
     #[arg(long = "state-dir", value_name = "DIR")]
     pub state_dir: Option<PathBuf>,
 

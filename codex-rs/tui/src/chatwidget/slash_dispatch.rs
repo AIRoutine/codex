@@ -222,9 +222,15 @@ impl ChatWidget {
                 }
             }
             SlashCommand::Automode => {
+                let cwd = self.config.cwd.to_string_lossy();
+                let cwd = shlex::try_quote(cwd.as_ref())
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_else(|_| cwd.into_owned());
                 self.add_info_message(
                     crate::automode::AUTOMODE_USAGE.to_string(),
-                    Some("Example: /automode 10m improve test coverage".to_string()),
+                    Some(format!(
+                        "Example: /automode --project {cwd} 10m improve test coverage; resume: /automode resume run1 --project {cwd}"
+                    )),
                 );
             }
             SlashCommand::Collab => {

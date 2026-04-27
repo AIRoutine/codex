@@ -4,7 +4,8 @@ expression: render_lines(&automode_started_lines(&state))
 ---
 /automode --project /work/project --duration 10m --goal ship the feature
 Automode started for /work/project
-  progress: /work/project/.codex/automode/progress.md
+  progress: /work/project/.codex/automode/run1/progress.md
+  run: run1
   duration: 10m
 Automode uses danger-full-access with approval_policy=never.
 It runs in this interactive thread until its duration expires or you interrupt it.
