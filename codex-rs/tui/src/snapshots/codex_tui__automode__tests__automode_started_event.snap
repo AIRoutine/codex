@@ -1,0 +1,9 @@
+---
+source: tui/src/automode.rs
+expression: render_lines(&automode_started_lines(&state))
+---
+/automode --project /work/project --duration 10m --goal ship the feature
+Automode started for /work/project
+  progress: /work/project/.codex/automode/progress.md
+Automode uses danger-full-access with approval_policy=never.
+It runs in this interactive thread, so live output and interrupts work like a normal turn.

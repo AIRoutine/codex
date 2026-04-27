@@ -1131,6 +1131,12 @@ enum ShellEscapePolicy {
     Disallow,
 }
 
+struct TurnContextOverride {
+    cwd: PathBuf,
+    approval_policy: AskForApproval,
+    sandbox_policy: SandboxPolicy,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct QueuedUserMessage {
     user_message: UserMessage,
@@ -6161,6 +6167,21 @@ impl ChatWidget {
         history_record: UserMessageHistoryRecord,
         shell_escape_policy: ShellEscapePolicy,
     ) -> (bool, Option<AppCommand>) {
+        self.submit_user_message_with_history_shell_escape_and_turn_context(
+            user_message,
+            history_record,
+            shell_escape_policy,
+            /*turn_context_override*/ None,
+        )
+    }
+
+    fn submit_user_message_with_history_shell_escape_and_turn_context(
+        &mut self,
+        user_message: UserMessage,
+        history_record: UserMessageHistoryRecord,
+        shell_escape_policy: ShellEscapePolicy,
+        turn_context_override: Option<TurnContextOverride>,
+    ) -> (bool, Option<AppCommand>) {
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.queued_user_messages
@@ -6397,11 +6418,26 @@ impl ChatWidget {
         } else {
             Some(self.config.permissions.permission_profile())
         };
+        let (cwd, approval_policy, sandbox_policy, permission_profile) = match turn_context_override
+        {
+            Some(context) => (
+                context.cwd,
+                context.approval_policy,
+                context.sandbox_policy,
+                None,
+            ),
+            None => (
+                self.config.cwd.to_path_buf(),
+                self.config.permissions.approval_policy.value(),
+                self.config.permissions.sandbox_policy.get().clone(),
+                permission_profile,
+            ),
+        };
         let op = AppCommand::user_turn(
             items,
-            self.config.cwd.to_path_buf(),
-            self.config.permissions.approval_policy.value(),
-            self.config.permissions.sandbox_policy.get().clone(),
+            cwd,
+            approval_policy,
+            sandbox_policy,
             permission_profile,
             effective_mode.model().to_string(),
             effective_mode.reasoning_effort(),
@@ -8040,7 +8076,7 @@ impl ChatWidget {
         submitted_follow_up
     }
 
-    pub(super) fn is_user_turn_pending_or_running(&self) -> bool {
+    pub(crate) fn is_user_turn_pending_or_running(&self) -> bool {
         self.user_turn_pending_start || self.bottom_pane.is_task_running()
     }
 
@@ -11422,6 +11458,34 @@ impl ChatWidget {
         } else {
             self.submit_user_message(user_message);
         }
+    }
+
+    pub(crate) fn submit_automode_turn_prompt(
+        &mut self,
+        turn_prompt: crate::automode::AutomodeTurnPrompt,
+    ) -> bool {
+        let user_message = UserMessage {
+            text: turn_prompt.prompt,
+            local_images: Vec::new(),
+            remote_image_urls: Vec::new(),
+            text_elements: Vec::new(),
+            mention_bindings: Vec::new(),
+        };
+        let history_record = UserMessageHistoryRecord::Override(UserMessageHistoryOverride {
+            text: turn_prompt.display_text,
+            text_elements: Vec::new(),
+        });
+        self.submit_user_message_with_history_shell_escape_and_turn_context(
+            user_message,
+            history_record,
+            ShellEscapePolicy::Disallow,
+            Some(TurnContextOverride {
+                cwd: turn_prompt.cwd,
+                approval_policy: AskForApproval::Never,
+                sandbox_policy: SandboxPolicy::DangerFullAccess,
+            }),
+        )
+        .0
     }
 
     /// True when the UI is in the regular composer state with no running task,

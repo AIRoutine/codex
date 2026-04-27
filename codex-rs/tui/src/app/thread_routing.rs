@@ -1376,6 +1376,13 @@ impl App {
         app_server: &mut AppServerSession,
         event: ThreadBufferedEvent,
     ) -> Result<()> {
+        let automode_turn_status = match &event {
+            ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(notification)) => {
+                Some(notification.turn.status.clone())
+            }
+            _ => None,
+        };
+
         // Capture this before any potential thread switch: we only want to clear
         // the exit marker when the currently active thread acknowledges shutdown.
         let pending_shutdown_exit_completed = matches!(
@@ -1432,6 +1439,9 @@ impl App {
         }
 
         self.handle_thread_event_now(event);
+        if let Some(status) = automode_turn_status {
+            self.handle_automode_turn_completed(tui, status);
+        }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();
         }

@@ -567,15 +567,29 @@ pub(crate) struct App {
 }
 
 struct AutomodeControllerState {
-    arg0_paths: Arg0DispatchPaths,
-    task: Option<JoinHandle<()>>,
+    session: Option<crate::automode::AutomodeRunState>,
+    deadline_task: Option<JoinHandle<()>>,
+    next_run_id: u64,
 }
 
 impl AutomodeControllerState {
-    fn new(arg0_paths: Arg0DispatchPaths) -> Self {
+    fn new() -> Self {
         Self {
-            arg0_paths,
-            task: None,
+            session: None,
+            deadline_task: None,
+            next_run_id: 1,
+        }
+    }
+
+    fn allocate_run_id(&mut self) -> u64 {
+        let run_id = self.next_run_id;
+        self.next_run_id = self.next_run_id.saturating_add(1);
+        run_id
+    }
+
+    fn clear_deadline_task(&mut self) {
+        if let Some(handle) = self.deadline_task.take() {
+            handle.abort();
         }
     }
 }
@@ -895,11 +909,13 @@ impl App {
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
+        let _ = arg0_paths;
+
         let mut app = Self {
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
-            automode: Box::new(AutomodeControllerState::new(arg0_paths)),
+            automode: Box::new(AutomodeControllerState::new()),
             chat_widget,
             config,
             active_profile,
@@ -1164,9 +1180,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        if let Some(handle) = self.automode.task.take() {
-            handle.abort();
-        }
+        self.automode.clear_deadline_task();
         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
         }

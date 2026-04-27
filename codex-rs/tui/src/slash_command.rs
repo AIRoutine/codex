@@ -179,7 +179,6 @@ impl SlashCommand {
             | SlashCommand::Memories
             | SlashCommand::Review
             | SlashCommand::Plan
-            | SlashCommand::Automode
             | SlashCommand::Clear
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
@@ -194,6 +193,7 @@ impl SlashCommand {
             | SlashCommand::Ps
             | SlashCommand::Stop
             | SlashCommand::Goal
+            | SlashCommand::Automode
             | SlashCommand::Mcp
             | SlashCommand::Apps
             | SlashCommand::Plugins

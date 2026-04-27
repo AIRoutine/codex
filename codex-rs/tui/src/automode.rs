@@ -1,14 +1,15 @@
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 
-use codex_exec::AutomodeEvent;
-use codex_exec::AutomodeMetricSnapshot;
-use codex_exec::AutomodeTurnSummarySnapshot;
 use codex_exec::parse_automode_duration;
-use codex_utils_cli::CliConfigOverrides;
+use codex_git_utils::get_git_repo_root;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+
+const PROGRESS_DOC_FILE: &str = "progress.md";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AutomodeStartRequest {
@@ -18,31 +19,27 @@ pub(crate) struct AutomodeStartRequest {
     pub(crate) skip_git_repo_check: bool,
 }
 
-impl AutomodeStartRequest {
-    pub(crate) fn into_exec_args(self) -> codex_exec::AutomodeArgs {
-        codex_exec::AutomodeArgs {
-            shared: codex_exec::ExecSharedCliOptions::default(),
-            project: Some(self.project),
-            duration: self.duration,
-            goal: self.goal,
-            state_dir: None,
-            skip_git_repo_check: self.skip_git_repo_check,
-            config_overrides: CliConfigOverrides::default(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutomodeSlashCommand {
     Start(AutomodeStartRequest),
     Stop,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AutomodeUiEvent {
-    Runtime(AutomodeEvent),
-    Failed { message: String },
-    Stopped,
+#[derive(Debug)]
+pub(crate) struct AutomodeRunState {
+    request: AutomodeStartRequest,
+    state_dir: PathBuf,
+    progress_path: PathBuf,
+    deadline: Instant,
+    iteration: u64,
+    run_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AutomodeTurnPrompt {
+    pub(crate) prompt: String,
+    pub(crate) display_text: String,
+    pub(crate) cwd: PathBuf,
 }
 
 pub(crate) const AUTOMODE_USAGE: &str =
@@ -126,6 +123,91 @@ pub(crate) fn parse_automode_slash_args(
     }))
 }
 
+impl AutomodeRunState {
+    pub(crate) fn start(request: AutomodeStartRequest, run_id: u64) -> Result<Self, String> {
+        if !request.project.is_dir() {
+            return Err(format!(
+                "Automode project does not exist or is not a directory: {}",
+                request.project.display()
+            ));
+        }
+        if !request.skip_git_repo_check && get_git_repo_root(&request.project).is_none() {
+            return Err(
+                "Not inside a trusted directory and --skip-git-repo-check was not specified."
+                    .to_string(),
+            );
+        }
+
+        let state_dir = request.project.join(".codex").join("automode");
+        fs::create_dir_all(&state_dir)
+            .map_err(|err| format!("Failed to create {}: {err}", state_dir.display()))?;
+
+        let progress_path = state_dir.join(PROGRESS_DOC_FILE);
+        if !progress_path.exists() {
+            fs::write(
+                &progress_path,
+                initial_progress_document(&request.goal, &request.project),
+            )
+            .map_err(|err| format!("Failed to write {}: {err}", progress_path.display()))?;
+        }
+
+        let deadline = Instant::now()
+            .checked_add(request.duration)
+            .unwrap_or_else(Instant::now);
+
+        Ok(Self {
+            request,
+            state_dir,
+            progress_path,
+            deadline,
+            iteration: 0,
+            run_id,
+        })
+    }
+
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub(crate) fn deadline_reached(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+
+    pub(crate) fn progress_path(&self) -> &Path {
+        &self.progress_path
+    }
+
+    pub(crate) fn next_turn_prompt(&mut self) -> AutomodeTurnPrompt {
+        self.iteration += 1;
+        let iteration = self.iteration;
+        let prompt = build_turn_prompt(
+            &self.request,
+            &self.state_dir,
+            &self.progress_path,
+            iteration,
+            self.remaining_duration(),
+        );
+        let display_text = format!(
+            "/automode iteration {iteration}: {}",
+            truncate(&self.request.goal, 120)
+        );
+
+        AutomodeTurnPrompt {
+            prompt,
+            display_text,
+            cwd: self.request.project.clone(),
+        }
+    }
+
+    fn remaining_duration(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+}
+
 pub(crate) fn format_automode_command(request: &AutomodeStartRequest) -> String {
     format!(
         "/automode --project {} --duration {} --goal {}",
@@ -135,24 +217,51 @@ pub(crate) fn format_automode_command(request: &AutomodeStartRequest) -> String 
     )
 }
 
-pub(crate) fn render_automode_event(event: &AutomodeUiEvent) -> Vec<Line<'static>> {
-    match event {
-        AutomodeUiEvent::Runtime(event) => render_runtime_event(event),
-        AutomodeUiEvent::Failed { message } => vec![
-            vec![
-                "Automode ".magenta().bold(),
-                "failed: ".red(),
-                truncate(message, 180).into(),
-            ]
-            .into(),
-        ],
-        AutomodeUiEvent::Stopped => {
-            vec![vec!["Automode ".magenta().bold(), "stopped by user.".red()].into()]
-        }
-    }
+pub(crate) fn automode_started_lines(state: &AutomodeRunState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        format_automode_command(&state.request).magenta().into(),
+        vec![
+            "Automode ".magenta().bold(),
+            "started".green(),
+            format!(" for {}", state.request.project.display()).into(),
+        ]
+        .into(),
+        vec![
+            "  progress: ".dim(),
+            state.progress_path.display().to_string().cyan(),
+        ]
+        .into(),
+    ];
+    lines.extend(automode_full_access_warning_lines());
+    lines
 }
 
-pub(crate) fn automode_full_access_warning_lines() -> Vec<Line<'static>> {
+pub(crate) fn automode_finished_lines(progress_path: &Path) -> Vec<Line<'static>> {
+    vec![
+        vec!["Automode ".magenta().bold(), "duration reached.".green()].into(),
+        vec![
+            "  progress: ".dim(),
+            progress_path.display().to_string().cyan(),
+        ]
+        .into(),
+    ]
+}
+
+pub(crate) fn automode_stopped_lines(progress_path: Option<&Path>) -> Vec<Line<'static>> {
+    let mut lines = vec![vec!["Automode ".magenta().bold(), "stopped.".red()].into()];
+    if let Some(progress_path) = progress_path {
+        lines.push(
+            vec![
+                "  progress: ".dim(),
+                progress_path.display().to_string().cyan(),
+            ]
+            .into(),
+        );
+    }
+    lines
+}
+
+fn automode_full_access_warning_lines() -> Vec<Line<'static>> {
     vec![
         vec![
             "Automode uses ".into(),
@@ -160,159 +269,10 @@ pub(crate) fn automode_full_access_warning_lines() -> Vec<Line<'static>> {
             " with approval_policy=never.".into(),
         ]
         .into(),
-        "It runs independently in the selected project until the duration expires."
+        "It runs in this interactive thread, so live output and interrupts work like a normal turn."
             .dim()
             .into(),
     ]
-}
-
-fn render_runtime_event(event: &AutomodeEvent) -> Vec<Line<'static>> {
-    match event {
-        AutomodeEvent::Started {
-            project,
-            state_dir,
-            progress_path,
-            deadline_at,
-            ..
-        } => vec![
-            vec![
-                "Automode ".magenta().bold(),
-                "started".green(),
-                format!(" for {}", project.display()).into(),
-            ]
-            .into(),
-            vec!["  state: ".dim(), state_dir.display().to_string().cyan()].into(),
-            vec![
-                "  progress: ".dim(),
-                progress_path.display().to_string().cyan(),
-                format!("; deadline_at={deadline_at}").dim(),
-            ]
-            .into(),
-        ],
-        AutomodeEvent::OperatorTurnStarted { iteration } => vec![
-            vec![
-                "Automode ".magenta().bold(),
-                format!("operator iteration {iteration}").into(),
-                " reading progress document".dim(),
-            ]
-            .into(),
-        ],
-        AutomodeEvent::OperatorDecision {
-            iteration,
-            progress_path,
-            assessment,
-            metrics,
-            next_prompt,
-        } => {
-            let mut lines = vec![
-                vec![
-                    "Automode ".magenta().bold(),
-                    format!("operator decision for iteration {iteration}").green(),
-                ]
-                .into(),
-                vec!["  metrics: ".dim(), format_metrics(metrics).into()].into(),
-                vec!["  assessment: ".dim(), truncate(assessment, 160).into()].into(),
-                vec!["  next: ".dim(), truncate(next_prompt, 160).into()].into(),
-            ];
-            lines.push(
-                vec![
-                    "  progress: ".dim(),
-                    progress_path.display().to_string().cyan(),
-                ]
-                .into(),
-            );
-            lines
-        }
-        AutomodeEvent::WorkerTurnStarted { iteration } => vec![
-            vec![
-                "Automode ".magenta().bold(),
-                format!("worker iteration {iteration}").into(),
-                " started".dim(),
-            ]
-            .into(),
-        ],
-        AutomodeEvent::WorkerTurnCompleted { iteration, summary } => {
-            render_worker_completed(*iteration, summary)
-        }
-        AutomodeEvent::Finished {
-            iteration,
-            progress_path,
-            error_seen,
-        } => {
-            let status = if *error_seen {
-                "finished with recorded errors".red()
-            } else {
-                "finished".green()
-            };
-            vec![
-                vec![
-                    "Automode ".magenta().bold(),
-                    status,
-                    format!(" after {iteration} iteration(s)").into(),
-                ]
-                .into(),
-                vec![
-                    "  progress: ".dim(),
-                    progress_path.display().to_string().cyan(),
-                ]
-                .into(),
-            ]
-        }
-    }
-}
-
-fn render_worker_completed(
-    iteration: u64,
-    summary: &AutomodeTurnSummarySnapshot,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        vec![
-            "Automode ".magenta().bold(),
-            format!("worker iteration {iteration} ").into(),
-            summary.status.clone().green(),
-            format!(
-                " ({} command(s), {} file change(s), {} error(s))",
-                summary.commands.len(),
-                summary.file_changes.len(),
-                summary.errors.len()
-            )
-            .dim(),
-        ]
-        .into(),
-    ];
-
-    if let Some(message) = summary.final_message.as_deref() {
-        lines.push(vec!["  message: ".dim(), truncate(message, 180).into()].into());
-    }
-    if let Some(file_change) = summary.file_changes.first() {
-        lines.push(vec!["  first change: ".dim(), truncate(file_change, 160).into()].into());
-    }
-    if let Some(error) = summary.errors.first() {
-        lines.push(vec!["  first error: ".dim(), truncate(error, 160).red()].into());
-    }
-
-    lines
-}
-
-fn format_metrics(metrics: &[AutomodeMetricSnapshot]) -> String {
-    if metrics.is_empty() {
-        return "none".to_string();
-    }
-
-    let mut parts = metrics
-        .iter()
-        .take(3)
-        .map(|metric| {
-            format!(
-                "{}={}/{} {}",
-                metric.name, metric.current, metric.target, metric.unit
-            )
-        })
-        .collect::<Vec<_>>();
-    if metrics.len() > 3 {
-        parts.push(format!("+{} more", metrics.len() - 3));
-    }
-    parts.join(", ")
 }
 
 fn resolve_project_arg(raw: &str, default_project: &Path) -> PathBuf {
@@ -322,6 +282,78 @@ fn resolve_project_arg(raw: &str, default_project: &Path) -> PathBuf {
     } else {
         default_project.join(path)
     }
+}
+
+fn initial_progress_document(goal: &str, project: &Path) -> String {
+    format!(
+        r#"# Automode Progress
+
+Goal: {goal}
+
+Project: {project}
+
+The simulated operator must keep this document current after every turn.
+
+## Completion Metrics
+
+Define fixed numeric metrics here before doing substantial work. Each metric must include:
+- name
+- baseline
+- current value
+- target
+- unit
+- measurement method
+- direction: increase, decrease, or equal
+
+## Iteration Log
+
+No iterations have been recorded yet.
+"#,
+        project = project.display()
+    )
+}
+
+fn build_turn_prompt(
+    request: &AutomodeStartRequest,
+    state_dir: &Path,
+    progress_path: &Path,
+    iteration: u64,
+    remaining: Duration,
+) -> String {
+    let remaining = format_duration(remaining);
+    format!(
+        r#"You are running inside Codex automode in the interactive TUI.
+
+Project:
+{project}
+
+Goal:
+{goal}
+
+Automode state directory:
+{state_dir}
+
+Progress document:
+{progress_path}
+
+Iteration: {iteration}
+Remaining run time before the controller stops automode: {remaining}
+
+You have danger-full-access and approval_policy=never for this automode turn.
+
+Before doing new work:
+1. Read the progress document.
+2. Evaluate whether the previous turn moved the goal closer using fixed numeric metrics.
+3. Update the progress document if you learned anything that improves the metrics, evaluation method, or next-step choice.
+4. Decide the single best next step.
+
+Then execute that next step immediately. Do not ask the user for input. If the goal appears complete, use the remaining turn to improve verification, source quality, documentation, reproducibility, or the final report in a measurable way. Keep working until this turn ends; the controller will decide whether to start another turn.
+"#,
+        project = request.project.display(),
+        goal = request.goal,
+        state_dir = state_dir.display(),
+        progress_path = progress_path.display(),
+    )
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -404,24 +436,47 @@ mod tests {
     }
 
     #[test]
-    fn automode_runtime_event_render_snapshot() {
-        let event = AutomodeUiEvent::Runtime(AutomodeEvent::OperatorDecision {
-            iteration: 2,
+    fn turn_prompt_points_model_at_progress_document() {
+        let request = AutomodeStartRequest {
+            project: PathBuf::from("/work/project"),
+            duration: Duration::from_secs(600),
+            goal: "ship the feature".to_string(),
+            skip_git_repo_check: true,
+        };
+
+        let prompt = build_turn_prompt(
+            &request,
+            Path::new("/work/project/.codex/automode"),
+            Path::new("/work/project/.codex/automode/progress.md"),
+            3,
+            Duration::from_secs(120),
+        );
+
+        assert!(prompt.contains("Iteration: 3"));
+        assert!(prompt.contains("/work/project/.codex/automode/progress.md"));
+        assert!(prompt.contains("Read the progress document"));
+    }
+
+    #[test]
+    fn started_lines_render_snapshot() {
+        let request = AutomodeStartRequest {
+            project: PathBuf::from("/work/project"),
+            duration: Duration::from_secs(600),
+            goal: "ship the feature".to_string(),
+            skip_git_repo_check: true,
+        };
+        let state = AutomodeRunState {
+            request,
+            state_dir: PathBuf::from("/work/project/.codex/automode"),
             progress_path: PathBuf::from("/work/project/.codex/automode/progress.md"),
-            assessment: "Coverage improved and the next validation target is clear.".to_string(),
-            metrics: vec![AutomodeMetricSnapshot {
-                name: "coverage_percent".to_string(),
-                current: 71.5,
-                target: 80.0,
-                unit: "percent".to_string(),
-                direction: "increase".to_string(),
-            }],
-            next_prompt: "Add focused tests for the remaining parser edge cases.".to_string(),
-        });
+            deadline: Instant::now(),
+            iteration: 0,
+            run_id: 1,
+        };
 
         insta::assert_snapshot!(
-            "automode_operator_decision_event",
-            render_lines(&render_automode_event(&event))
+            "automode_started_event",
+            render_lines(&automode_started_lines(&state))
         );
     }
 

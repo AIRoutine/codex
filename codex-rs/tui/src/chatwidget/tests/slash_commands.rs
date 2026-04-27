@@ -1817,6 +1817,49 @@ async fn slash_automode_stop_requests_stop() {
 }
 
 #[tokio::test]
+async fn automode_turn_prompt_submits_full_access_user_turn() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+    let project = PathBuf::from("/tmp/automode-project");
+
+    assert!(
+        chat.submit_automode_turn_prompt(crate::automode::AutomodeTurnPrompt {
+            prompt: "internal automode prompt".to_string(),
+            display_text: "/automode iteration 1: visible goal".to_string(),
+            cwd: project.clone(),
+        })
+    );
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            items,
+            cwd,
+            approval_policy,
+            sandbox_policy,
+            permission_profile,
+            ..
+        } => {
+            assert_eq!(cwd, project);
+            assert_eq!(approval_policy, AskForApproval::Never);
+            assert_eq!(sandbox_policy, SandboxPolicy::DangerFullAccess);
+            assert_eq!(permission_profile, None);
+            assert_eq!(
+                items,
+                vec![UserInput::Text {
+                    text: "internal automode prompt".to_string(),
+                    text_elements: Vec::new(),
+                }]
+            );
+        }
+        other => panic!("expected automode UserTurn, got {other:?}"),
+    }
+    assert_eq!(
+        next_add_to_history_op(&mut op_rx),
+        "/automode iteration 1: visible goal"
+    );
+}
+
+#[tokio::test]
 async fn slash_memories_opens_memory_menu() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);

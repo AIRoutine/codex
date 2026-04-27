@@ -384,14 +384,16 @@ pub(crate) enum AppEvent {
         result: Result<SkillsListResponse, String>,
     },
 
-    /// Start an independent automode run from the interactive TUI.
+    /// Start automode in the active interactive thread.
     StartAutomode(crate::automode::AutomodeStartRequest),
 
-    /// Stop the currently running TUI-owned automode task, if any.
+    /// Stop the currently running automode loop, if any.
     StopAutomode,
 
-    /// Render live output from a TUI-owned automode task.
-    AutomodeEvent(crate::automode::AutomodeUiEvent),
+    /// Stop automode when its configured duration expires.
+    AutomodeDeadlineReached {
+        run_id: u64,
+    },
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 
