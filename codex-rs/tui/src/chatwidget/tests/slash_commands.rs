@@ -1797,9 +1797,10 @@ async fn slash_automode_with_args_requests_start() {
     match rx.try_recv() {
         Ok(AppEvent::StartAutomode(request)) => {
             assert_eq!(request.project, chat.config.cwd.to_path_buf());
-            assert_eq!(request.duration, std::time::Duration::from_secs(600));
+            assert_eq!(request.duration, Some(std::time::Duration::from_secs(600)));
             assert_eq!(request.goal, "improve test coverage");
             assert!(!request.skip_git_repo_check);
+            assert!(!request.resume);
         }
         other => panic!("expected StartAutomode event, got {other:?}"),
     }

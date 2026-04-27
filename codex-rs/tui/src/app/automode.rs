@@ -31,13 +31,14 @@ impl App {
             }
         };
 
-        let deadline = session.deadline();
-        let tx = self.app_event_tx.clone();
         self.automode.clear_deadline_task();
-        self.automode.deadline_task = Some(tokio::spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-            tx.send(AppEvent::AutomodeDeadlineReached { run_id });
-        }));
+        if let Some(deadline) = session.deadline() {
+            let tx = self.app_event_tx.clone();
+            self.automode.deadline_task = Some(tokio::spawn(async move {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                tx.send(AppEvent::AutomodeDeadlineReached { run_id });
+            }));
+        }
 
         self.chat_widget
             .add_plain_history_lines(crate::automode::automode_started_lines(&session));

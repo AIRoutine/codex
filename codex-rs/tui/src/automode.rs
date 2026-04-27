@@ -10,13 +10,16 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 
 const PROGRESS_DOC_FILE: &str = "progress.md";
+const TUI_STATE_FILE: &str = "tui-state.json";
+const EXEC_STATE_FILE: &str = "state.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AutomodeStartRequest {
     pub(crate) project: PathBuf,
-    pub(crate) duration: Duration,
+    pub(crate) duration: Option<Duration>,
     pub(crate) goal: String,
     pub(crate) skip_git_repo_check: bool,
+    pub(crate) resume: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +33,7 @@ pub(crate) struct AutomodeRunState {
     request: AutomodeStartRequest,
     state_dir: PathBuf,
     progress_path: PathBuf,
-    deadline: Instant,
+    deadline: Option<Instant>,
     iteration: u64,
     run_id: u64,
 }
@@ -42,8 +45,7 @@ pub(crate) struct AutomodeTurnPrompt {
     pub(crate) cwd: PathBuf,
 }
 
-pub(crate) const AUTOMODE_USAGE: &str =
-    "Usage: /automode <duration> <goal> [--project DIR] [--skip-git-repo-check]";
+pub(crate) const AUTOMODE_USAGE: &str = "Usage: /automode [<duration>] <goal> [--project DIR] [--skip-git-repo-check] | /automode resume [--duration DURATION] [--project DIR]";
 
 pub(crate) fn parse_automode_slash_args(
     raw: &str,
@@ -57,6 +59,10 @@ pub(crate) fn parse_automode_slash_args(
 
     if tokens.len() == 1 && tokens[0].eq_ignore_ascii_case("stop") {
         return Ok(AutomodeSlashCommand::Stop);
+    }
+
+    if tokens[0].eq_ignore_ascii_case("resume") {
+        return parse_resume_args(&tokens[1..], default_project);
     }
 
     let mut project = default_project.to_path_buf();
@@ -92,12 +98,21 @@ pub(crate) fn parse_automode_slash_args(
                 skip_git_repo_check = true;
                 index += 1;
             }
-            token if duration.is_none() => {
-                duration = Some(parse_automode_duration(token).map_err(|err| {
-                    format!("{err}. First positional argument must be the duration.")
-                })?);
-                index += 1;
-            }
+            token if duration.is_none() => match parse_automode_duration(token) {
+                Ok(parsed_duration) => {
+                    duration = Some(parsed_duration);
+                    index += 1;
+                }
+                Err(err) if starts_with_ascii_digit(token) => {
+                    return Err(format!(
+                        "{err}. First positional argument must be a valid duration or part of the goal."
+                    ));
+                }
+                Err(_) => {
+                    goal_parts.push(token.to_string());
+                    index += 1;
+                }
+            },
             token => {
                 goal_parts.push(token.to_string());
                 index += 1;
@@ -105,8 +120,7 @@ pub(crate) fn parse_automode_slash_args(
         }
     }
 
-    let duration = duration.ok_or_else(|| AUTOMODE_USAGE.to_string())?;
-    if duration.is_zero() {
+    if duration.is_some_and(|duration| duration.is_zero()) {
         return Err("Duration must be greater than zero.".to_string());
     }
 
@@ -120,6 +134,62 @@ pub(crate) fn parse_automode_slash_args(
         duration,
         goal,
         skip_git_repo_check,
+        resume: false,
+    }))
+}
+
+fn parse_resume_args(
+    tokens: &[String],
+    default_project: &Path,
+) -> Result<AutomodeSlashCommand, String> {
+    let mut project = default_project.to_path_buf();
+    let mut duration = None;
+    let mut skip_git_repo_check = false;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        match tokens[index].as_str() {
+            "--project" | "-p" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("Missing value after --project.".to_string());
+                };
+                project = resolve_project_arg(value, default_project);
+                index += 2;
+            }
+            "--duration" | "-d" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("Missing value after --duration.".to_string());
+                };
+                duration = Some(parse_automode_duration(value)?);
+                index += 2;
+            }
+            "--skip-git-repo-check" => {
+                skip_git_repo_check = true;
+                index += 1;
+            }
+            token if duration.is_none() => {
+                duration = Some(parse_automode_duration(token).map_err(|err| {
+                    format!("{err}. Resume accepts only an optional duration and flags.")
+                })?);
+                index += 1;
+            }
+            token => {
+                return Err(format!("Unexpected /automode resume argument: {token}"));
+            }
+        }
+    }
+
+    if duration.is_some_and(|duration| duration.is_zero()) {
+        return Err("Duration must be greater than zero.".to_string());
+    }
+
+    let goal = read_resume_goal(&project)?;
+    Ok(AutomodeSlashCommand::Start(AutomodeStartRequest {
+        project,
+        duration,
+        goal,
+        skip_git_repo_check,
+        resume: true,
     }))
 }
 
@@ -151,9 +221,13 @@ impl AutomodeRunState {
             .map_err(|err| format!("Failed to write {}: {err}", progress_path.display()))?;
         }
 
-        let deadline = Instant::now()
-            .checked_add(request.duration)
-            .unwrap_or_else(Instant::now);
+        write_tui_state(&state_dir, &request)?;
+
+        let deadline = request.duration.map(|duration| {
+            Instant::now()
+                .checked_add(duration)
+                .unwrap_or_else(Instant::now)
+        });
 
         Ok(Self {
             request,
@@ -169,12 +243,13 @@ impl AutomodeRunState {
         self.run_id
     }
 
-    pub(crate) fn deadline(&self) -> Instant {
+    pub(crate) fn deadline(&self) -> Option<Instant> {
         self.deadline
     }
 
     pub(crate) fn deadline_reached(&self) -> bool {
-        Instant::now() >= self.deadline
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
     pub(crate) fn progress_path(&self) -> &Path {
@@ -204,31 +279,63 @@ impl AutomodeRunState {
     }
 
     fn remaining_duration(&self) -> Duration {
-        self.deadline.saturating_duration_since(Instant::now())
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(Duration::MAX)
     }
 }
 
 pub(crate) fn format_automode_command(request: &AutomodeStartRequest) -> String {
-    format!(
-        "/automode --project {} --duration {} --goal {}",
-        request.project.display(),
-        format_duration(request.duration),
-        request.goal
-    )
+    let command = if request.resume { "resume" } else { "--goal" };
+    match (request.resume, request.duration) {
+        (true, Some(duration)) => format!(
+            "/automode {command} --project {} --duration {}",
+            request.project.display(),
+            format_duration(duration)
+        ),
+        (true, None) => format!(
+            "/automode {command} --project {}",
+            request.project.display()
+        ),
+        (false, Some(duration)) => format!(
+            "/automode --project {} --duration {} --goal {}",
+            request.project.display(),
+            format_duration(duration),
+            request.goal
+        ),
+        (false, None) => format!(
+            "/automode --project {} --goal {}",
+            request.project.display(),
+            request.goal
+        ),
+    }
 }
 
 pub(crate) fn automode_started_lines(state: &AutomodeRunState) -> Vec<Line<'static>> {
+    let action = if state.request.resume {
+        "resumed"
+    } else {
+        "started"
+    };
     let mut lines = vec![
         format_automode_command(&state.request).magenta().into(),
         vec![
             "Automode ".magenta().bold(),
-            "started".green(),
+            action.green(),
             format!(" for {}", state.request.project.display()).into(),
         ]
         .into(),
         vec![
             "  progress: ".dim(),
             state.progress_path.display().to_string().cyan(),
+        ]
+        .into(),
+        vec![
+            "  duration: ".dim(),
+            match state.request.duration {
+                Some(duration) => format_duration(duration).into(),
+                None => "unlimited".cyan(),
+            },
         ]
         .into(),
     ];
@@ -269,10 +376,71 @@ fn automode_full_access_warning_lines() -> Vec<Line<'static>> {
             " with approval_policy=never.".into(),
         ]
         .into(),
-        "It runs in this interactive thread, so live output and interrupts work like a normal turn."
+        "It runs in this interactive thread until its duration expires or you interrupt it."
             .dim()
             .into(),
     ]
+}
+
+fn starts_with_ascii_digit(value: &str) -> bool {
+    value.as_bytes().first().is_some_and(u8::is_ascii_digit)
+}
+
+fn read_resume_goal(project: &Path) -> Result<String, String> {
+    let state_dir = project.join(".codex").join("automode");
+    read_goal_from_tui_state(&state_dir)
+        .or_else(|| read_goal_from_exec_state(&state_dir))
+        .or_else(|| read_goal_from_progress_doc(&state_dir.join(PROGRESS_DOC_FILE)))
+        .ok_or_else(|| {
+            format!(
+                "Could not resume automode. No goal found in {}.",
+                state_dir.display()
+            )
+        })
+}
+
+fn read_goal_from_tui_state(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join(TUI_STATE_FILE);
+    let contents = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    value
+        .get("goal")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .map(str::to_string)
+}
+
+fn read_goal_from_exec_state(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join(EXEC_STATE_FILE);
+    let contents = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    value
+        .get("goal")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|goal| !goal.is_empty())
+        .map(str::to_string)
+}
+
+fn read_goal_from_progress_doc(progress_path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(progress_path).ok()?;
+    contents.lines().find_map(|line| {
+        line.strip_prefix("Goal:")
+            .map(str::trim)
+            .filter(|goal| !goal.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn write_tui_state(state_dir: &Path, request: &AutomodeStartRequest) -> Result<(), String> {
+    let path = state_dir.join(TUI_STATE_FILE);
+    let contents = serde_json::to_vec_pretty(&serde_json::json!({
+        "goal": request.goal.as_str(),
+        "project": request.project.to_string_lossy(),
+    }))
+    .map_err(|err| format!("Failed to serialize {}: {err}", path.display()))?;
+    fs::write(&path, contents).map_err(|err| format!("Failed to write {}: {err}", path.display()))
 }
 
 fn resolve_project_arg(raw: &str, default_project: &Path) -> PathBuf {
@@ -320,7 +488,11 @@ fn build_turn_prompt(
     iteration: u64,
     remaining: Duration,
 ) -> String {
-    let remaining = format_duration(remaining);
+    let remaining = if remaining == Duration::MAX {
+        "unlimited; run until /automode stop or interrupt".to_string()
+    } else {
+        format_duration(remaining)
+    };
     format!(
         r#"You are running inside Codex automode in the interactive TUI.
 
@@ -396,9 +568,30 @@ mod tests {
             command,
             AutomodeSlashCommand::Start(AutomodeStartRequest {
                 project: PathBuf::from("/work/project"),
-                duration: Duration::from_secs(600),
+                duration: Some(Duration::from_secs(600)),
                 goal: "find the best beach destination".to_string(),
                 skip_git_repo_check: false,
+                resume: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_goal_without_duration_as_unlimited() {
+        let command = parse_automode_slash_args(
+            "find the best beach destination",
+            Path::new("/work/project"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            command,
+            AutomodeSlashCommand::Start(AutomodeStartRequest {
+                project: PathBuf::from("/work/project"),
+                duration: None,
+                goal: "find the best beach destination".to_string(),
+                skip_git_repo_check: false,
+                resume: false,
             })
         );
     }
@@ -415,9 +608,63 @@ mod tests {
             command,
             AutomodeSlashCommand::Start(AutomodeStartRequest {
                 project: PathBuf::from("/work/project/child"),
-                duration: Duration::from_secs(7200),
+                duration: Some(Duration::from_secs(7200)),
                 goal: "run validation".to_string(),
                 skip_git_repo_check: true,
+                resume: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_resume_with_duration_from_progress_doc() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        let state_dir = project.join(".codex").join("automode");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join(PROGRESS_DOC_FILE),
+            "# Automode Progress\n\nGoal: resume this goal\n\nProject: /tmp/project\n",
+        )
+        .unwrap();
+
+        let command = parse_automode_slash_args("resume --duration 30m", project).unwrap();
+
+        assert_eq!(
+            command,
+            AutomodeSlashCommand::Start(AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: Some(Duration::from_secs(1800)),
+                goal: "resume this goal".to_string(),
+                skip_git_repo_check: false,
+                resume: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_resume_without_duration_as_unlimited() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path();
+        let state_dir = project.join(".codex").join("automode");
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join(TUI_STATE_FILE),
+            serde_json::json!({ "goal": "resume forever", "project": project.display().to_string() })
+                .to_string(),
+        )
+        .unwrap();
+
+        let command = parse_automode_slash_args("resume", project).unwrap();
+
+        assert_eq!(
+            command,
+            AutomodeSlashCommand::Start(AutomodeStartRequest {
+                project: project.to_path_buf(),
+                duration: None,
+                goal: "resume forever".to_string(),
+                skip_git_repo_check: false,
+                resume: true,
             })
         );
     }
@@ -433,15 +680,17 @@ mod tests {
     #[test]
     fn requires_goal() {
         assert!(parse_automode_slash_args("10m", Path::new("/work/project")).is_err());
+        assert!(parse_automode_slash_args("10x run", Path::new("/work/project")).is_err());
     }
 
     #[test]
     fn turn_prompt_points_model_at_progress_document() {
         let request = AutomodeStartRequest {
             project: PathBuf::from("/work/project"),
-            duration: Duration::from_secs(600),
+            duration: Some(Duration::from_secs(600)),
             goal: "ship the feature".to_string(),
             skip_git_repo_check: true,
+            resume: false,
         };
 
         let prompt = build_turn_prompt(
@@ -461,15 +710,16 @@ mod tests {
     fn started_lines_render_snapshot() {
         let request = AutomodeStartRequest {
             project: PathBuf::from("/work/project"),
-            duration: Duration::from_secs(600),
+            duration: Some(Duration::from_secs(600)),
             goal: "ship the feature".to_string(),
             skip_git_repo_check: true,
+            resume: false,
         };
         let state = AutomodeRunState {
             request,
             state_dir: PathBuf::from("/work/project/.codex/automode"),
             progress_path: PathBuf::from("/work/project/.codex/automode/progress.md"),
-            deadline: Instant::now(),
+            deadline: Some(Instant::now()),
             iteration: 0,
             run_id: 1,
         };
